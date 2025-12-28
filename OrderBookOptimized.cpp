@@ -1,3 +1,4 @@
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -6,6 +7,7 @@
 #include <iostream>
 #include <list>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -23,6 +25,8 @@ using Qty = uint32_t;
 
 class Order {
 public:
+  Order()
+      : side_{}, id_{}, type_{}, price_{}, initialQty_{}, remainingQty_{0} {};
   Order(Side side, OrderId id, OrderType type, Price price, Qty qty)
       : side_{side}, id_{id}, type_{type}, price_{price}, initialQty_{qty},
         remainingQty_{qty} {
@@ -35,6 +39,13 @@ public:
   Qty getInitialQty() { return initialQty_; }
   Qty getRemainingQty() { return remainingQty_; }
   Qty getFilledQty() { return initialQty_ - remainingQty_; }
+
+  void setOrderId(OrderId id) { id_ = id; }
+  void setSide(Side side) { side_ = side; }
+  void setOrderType(OrderType type) { type_ = type; }
+  void setPrice(Price price) { price_ = price; }
+  void setInitialQty(Qty qty) { initialQty_ = qty; }
+  void setRemainingQty(Qty qty) { remainingQty_ = qty; }
 
   void fill(Qty exec) {
     if (exec > remainingQty_)
@@ -52,6 +63,39 @@ private:
   Qty remainingQty_;
 };
 
+class OrderPool {
+public:
+  OrderPool() : pool_{} {};
+
+  std::vector<std::shared_ptr<Order>> generateOrders(int numOrders);
+  std::shared_ptr<Order> allocate(OrderId id, Side side, OrderType type,
+                                  Qty qty, Price price) {
+    if (pool_.empty()) {
+      pool_ = generateOrders(defaultNumOrders);
+    }
+    auto orderPointer = pool_.back();
+    orderPointer->setOrderId(id);
+    orderPointer->setSide(side);
+    orderPointer->setOrderType(type);
+    orderPointer->setInitialQty(qty);
+    orderPointer->setRemainingQty(qty);
+    orderPointer->setPrice(price);
+    return orderPointer;
+  }
+
+private:
+  std::vector<std::shared_ptr<Order>> pool_;
+  static const int defaultNumOrders = 100;
+};
+
+std::vector<std::shared_ptr<Order>> OrderPool::generateOrders(int numOrders) {
+  std::vector<std::shared_ptr<Order>> pool{};
+  for (int i = 0; i < numOrders; ++i) {
+    auto order = std::make_shared<Order>();
+    pool.emplace_back(order);
+  }
+  return pool;
+}
 // for logging purposes
 struct TradeInfo {
   OrderId id_;
@@ -72,7 +116,7 @@ private:
 };
 
 using Trades = std::vector<Trade>;
-using Level = std::list<Order>;
+using Level = std::vector<std::shared_ptr<Order>>;
 using Handler = std::list<Order>::iterator;
 struct Handle {
   Side side;
@@ -82,24 +126,24 @@ struct Handle {
 
 class OrderBook {
 public:
-  OrderBook() : asks_{}, bids_{}, orderIdToIterator_{} {}
+  OrderBook() : asks_{}, bids_{}, orderIdToIterator_{}, pool_{} {}
 
   OrderId nextId() {
     return nextOrderId_.fetch_add(1, std::memory_order_relaxed);
   }
   Trades add_limit(Side side, Price price, Qty qty) {
     OrderId id = nextId();
-    Order order(side, id, OrderType::LIMIT, price, qty);
+    auto orderPointer = pool_.allocate(id, side, OrderType::LIMIT, qty, price);
     Handler iterator;
 
     if (side == Side::BUY) {
-      auto &orders = bids_[price];
-      orders.push_back(order);
-      iterator = std::prev(orders.end());
+      auto level = bids_[price];
+      level.push_back(orderPointer);
+      iterator = std::prev(level.end());
     } else {
-      auto &orders = asks_[price];
-      orders.push_back(order);
-      iterator = std::prev(orders.end());
+      auto level = asks_[price];
+      level.push_back(orderPointer);
+      iterator = std::prev(level.end());
     }
     Handle handle{side, price, iterator};
     orderIdToIterator_.insert({id, handle});
@@ -211,4 +255,5 @@ private:
   std::map<Price, Level, std::greater<Price>> bids_;
   std::unordered_map<OrderId, Handle> orderIdToIterator_;
   std::atomic<OrderId> nextOrderId_{1};
+  OrderPool pool_;
 };
